@@ -1030,6 +1030,7 @@ static int venus_hfi_sys_set_idle_message(struct venus_hfi_device *device,
 static int venus_hfi_core_init(void *device)
 {
 	struct hfi_cmd_sys_init_packet pkt;
+	struct hfi_cmd_sys_get_property_packet version_pkt;
 	int rc = 0;
 	struct venus_hfi_device *dev;
 
@@ -1088,6 +1089,10 @@ static int venus_hfi_core_init(void *device)
 		rc = -ENOTEMPTY;
 		goto err_core_init;
 	}
+	rc = create_pkt_cmd_sys_image_version(&version_pkt);
+	if (rc || venus_hfi_iface_cmdq_write(dev, &version_pkt))
+		dprintk(VIDC_WARN, "Failed to send image version pkt to f/w");
+
 	return rc;
 err_core_init:
 	disable_irq_nosync(dev->hal_data->irq);
@@ -2326,13 +2331,15 @@ static int venus_hfi_init_bus(struct venus_hfi_device *device)
 	bus_info = &device->resources.bus_info;
 
 	bus_info->ddr_handle[MSM_VIDC_ENCODER] =
-		msm_bus_scale_register_client(&device->res->bus_pdata[2]);
+		msm_bus_scale_register_client(
+			&device->res->bus_pdata[BUS_IDX_ENC_DDR]);
 	if (!bus_info->ddr_handle[MSM_VIDC_ENCODER]) {
 		dprintk(VIDC_ERR, "Failed to register bus scale client\n");
 		goto err_init_bus;
 	}
 	bus_info->ddr_handle[MSM_VIDC_DECODER] =
-		msm_bus_scale_register_client(&device->res->bus_pdata[3]);
+		msm_bus_scale_register_client(
+			&device->res->bus_pdata[BUS_IDX_DEC_DDR]);
 	if (!bus_info->ddr_handle[MSM_VIDC_DECODER]) {
 		dprintk(VIDC_ERR, "Failed to register bus scale client\n");
 		goto err_init_bus;
@@ -2341,7 +2348,7 @@ static int venus_hfi_init_bus(struct venus_hfi_device *device)
 	if (device->res->has_ocmem) {
 		bus_info->ocmem_handle[MSM_VIDC_ENCODER] =
 			msm_bus_scale_register_client(
-						&device->res->bus_pdata[0]);
+				&device->res->bus_pdata[BUS_IDX_ENC_OCMEM]);
 		if (!bus_info->ocmem_handle[MSM_VIDC_ENCODER]) {
 			dprintk(VIDC_ERR,
 				"Failed to register bus scale client\n");
@@ -2350,7 +2357,7 @@ static int venus_hfi_init_bus(struct venus_hfi_device *device)
 
 		bus_info->ocmem_handle[MSM_VIDC_DECODER] =
 			msm_bus_scale_register_client(
-						&device->res->bus_pdata[1]);
+				&device->res->bus_pdata[BUS_IDX_DEC_OCMEM]);
 		if (!bus_info->ocmem_handle[MSM_VIDC_DECODER]) {
 			dprintk(VIDC_ERR,
 				"Failed to register bus scale client\n");
@@ -2374,15 +2381,35 @@ static const u32 venus_hfi_bus_table[] = {
 	979200,
 };
 
-static int venus_hfi_get_bus_vector(int load)
+static int venus_hfi_get_bus_vector(struct venus_hfi_device *device, int load,
+			enum session_type type, enum mem_type mtype)
 {
 	int num_rows = sizeof(venus_hfi_bus_table)/(sizeof(u32));
 	int i, j;
+	int idx = 0;
+
+	if (!device || (mtype != DDR_MEM && mtype != OCMEM_MEM) ||
+		(type != MSM_VIDC_ENCODER && type != MSM_VIDC_DECODER)) {
+		dprintk(VIDC_ERR, "%s invalid params", __func__);
+		return -EINVAL;
+	}
+
 	for (i = 0; i < num_rows; i++) {
 		if (load <= venus_hfi_bus_table[i])
 			break;
 	}
+
+	if (type == MSM_VIDC_ENCODER)
+		idx = (mtype == DDR_MEM) ? BUS_IDX_ENC_DDR : BUS_IDX_ENC_OCMEM;
+	else
+		idx = (mtype == DDR_MEM) ? BUS_IDX_DEC_DDR : BUS_IDX_DEC_OCMEM;
+
 	j = clamp(i, 0, num_rows-1) + 1;
+
+	/* Ensure bus index remains within the supported range,
+	* as specified in the device dtsi file */
+	j = clamp(j, 0, device->res->bus_pdata[idx].num_usecases - 1);
+
 	dprintk(VIDC_DBG, "Required bus = %d\n", j);
 	return j;
 }
@@ -2393,6 +2420,7 @@ static int venus_hfi_scale_bus(void *dev, int load,
 	int rc = 0;
 	u32 handle = 0;
 	struct venus_hfi_device *device = dev;
+	int bus_vector = 0;
 
 	if (!device) {
 		dprintk(VIDC_ERR, "%s invalid device handle %p",
@@ -2406,8 +2434,13 @@ static int venus_hfi_scale_bus(void *dev, int load,
 		handle = device->resources.bus_info.ocmem_handle[type];
 
 	if (handle) {
-		rc = msm_bus_scale_client_update_request(
-				handle, venus_hfi_get_bus_vector(load));
+		bus_vector = venus_hfi_get_bus_vector(device, load,
+				type, mtype);
+		if (bus_vector < 0) {
+			dprintk(VIDC_ERR, "Failed to get bus vector\n");
+			return -EINVAL;
+		}
+		rc = msm_bus_scale_client_update_request(handle, bus_vector);
 		if (rc)
 			dprintk(VIDC_ERR, "Failed to scale bus: %d\n", rc);
 	} else {

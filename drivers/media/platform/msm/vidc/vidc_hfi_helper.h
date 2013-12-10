@@ -198,6 +198,10 @@ struct hfi_buffer_info {
 	(HFI_PROPERTY_SYS_COMMON_START + 0x003)
 #define HFI_PROPERTY_SYS_IDLE_INDICATOR         \
 	(HFI_PROPERTY_SYS_COMMON_START + 0x004)
+#define  HFI_PROPERTY_SYS_CODEC_POWER_PLANE_CTRL     \
+	(HFI_PROPERTY_SYS_COMMON_START + 0x005)
+#define  HFI_PROPERTY_SYS_IMAGE_VERSION    \
+	(HFI_PROPERTY_SYS_COMMON_START + 0x006)
 
 #define HFI_PROPERTY_PARAM_COMMON_START	\
 	(HFI_DOMAIN_BASE_COMMON + HFI_ARCH_COMMON_OFFSET + 0x1000)
@@ -309,6 +313,12 @@ struct hfi_buffer_info {
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x01F)
 #define  HFI_PROPERTY_PARAM_VENC_MAX_NUM_B_FRAMES \
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x020)
+#define HFI_PROPERTY_PARAM_VENC_H264_VUI_BITSTREAM_RESTRC \
+	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x021)
+#define HFI_PROPERTY_PARAM_VENC_PRESERVE_TEXT_QUALITY \
+	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x023)
+
+
 #define HFI_PROPERTY_CONFIG_VENC_COMMON_START				\
 	(HFI_DOMAIN_BASE_VENC + HFI_ARCH_COMMON_OFFSET + 0x6000)
 #define HFI_PROPERTY_CONFIG_VENC_TARGET_BITRATE				\
@@ -430,10 +440,6 @@ struct hfi_idr_period {
 
 struct hfi_max_num_b_frames {
 	u32 max_num_b_frames;
-};
-
-struct hfi_conceal_color {
-	u32 conceal_color;
 };
 
 struct hfi_intra_period {
@@ -620,6 +626,11 @@ struct hfi_resource_ocmem_requirement_info {
 	struct hfi_resource_ocmem_requirement rg_requirements[1];
 };
 
+struct hfi_property_sys_image_version_info_type {
+	u32 string_size;
+	u8  str_image_version[1];
+};
+
 struct hfi_venc_config_advanced {
 	u8 pipe2d;
 	u8 hw_mode;
@@ -708,6 +719,7 @@ struct hfi_mvc_buffer_lauout_descp_type {
 #define HFI_MSG_SYS_SESSION_INIT_DONE	(HFI_MSG_SYS_COMMON_START + 0x6)
 #define HFI_MSG_SYS_SESSION_END_DONE	(HFI_MSG_SYS_COMMON_START + 0x7)
 #define HFI_MSG_SYS_IDLE		(HFI_MSG_SYS_COMMON_START + 0x8)
+#define HFI_MSG_SYS_PROPERTY_INFO	(HFI_MSG_SYS_COMMON_START + 0xA)
 
 #define HFI_MSG_SESSION_COMMON_START		\
 	(HFI_DOMAIN_BASE_COMMON + HFI_ARCH_COMMON_OFFSET +	\
@@ -831,6 +843,12 @@ struct hfi_msg_event_notify_packet {
 	u32 event_data1;
 	u32 event_data2;
 	u32 rg_ext_event_data[1];
+};
+
+struct hfi_msg_release_buffer_ref_event_packet {
+	u8 *packet_buffer;
+	u8 *exra_data_buffer;
+	u32 output_tag;
 };
 
 struct hfi_msg_sys_init_done_packet {

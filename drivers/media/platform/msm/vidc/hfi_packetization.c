@@ -32,6 +32,7 @@ static int profile_table[] = {
 		HFI_H264_PROFILE_CONSTRAINED_BASE,
 	[ilog2(HAL_H264_PROFILE_CONSTRAINED_HIGH)] =
 		HFI_H264_PROFILE_CONSTRAINED_HIGH,
+	[ilog2(HAL_VPX_PROFILE_VERSION_1)] = HFI_VPX_PROFILE_VERSION_1,
 };
 
 static int entropy_mode[] = {
@@ -191,7 +192,7 @@ int create_pkt_set_cmd_sys_resource(
 			(struct ocmem_buf *) resource_value;
 
 		pkt->resource_type = HFI_RESOURCE_OCMEM;
-		pkt->size += sizeof(struct hfi_resource_ocmem);
+		pkt->size += sizeof(struct hfi_resource_ocmem) - sizeof(u32);
 		hfioc_mem->size = (u32) ocmem->len;
 		hfioc_mem->mem = (u8 *) ocmem->addr;
 		break;
@@ -370,6 +371,9 @@ static u32 get_hfi_buf_mode(enum buffer_mode_type hal_buf_mode)
 	case HAL_BUFFER_MODE_RING:
 		buf_mode = HFI_BUFFER_MODE_RING;
 		break;
+	case HAL_BUFFER_MODE_DYNAMIC:
+		buf_mode = HFI_BUFFER_MODE_DYNAMIC;
+		break;
 	default:
 		dprintk(VIDC_ERR, "Invalid buffer mode :0x%x\n",
 				hal_buf_mode);
@@ -543,6 +547,8 @@ int create_pkt_cmd_session_ftb(struct hfi_cmd_session_fill_buffer_packet *pkt,
 	pkt->alloc_len = output_frame->alloc_len;
 	pkt->filled_len = output_frame->filled_len;
 	pkt->offset = output_frame->offset;
+	pkt->output_tag = session_id;
+	pkt->rgData[0] = output_frame->extradata_size;
 	dprintk(VIDC_DBG, "### Q OUTPUT BUFFER ###: %d, %d, %d\n",
 			pkt->alloc_len, pkt->filled_len, pkt->offset);
 
@@ -1160,19 +1166,6 @@ int create_pkt_cmd_session_set_property(
 		pkt->size += sizeof(u32) * 2;
 		break;
 	}
-	case HAL_PARAM_VDEC_CONCEAL_COLOR:
-	{
-		struct hfi_conceal_color *hfi;
-		pkt->rg_property_data[0] =
-			HFI_PROPERTY_PARAM_VDEC_CONCEAL_COLOR;
-		hfi = (struct hfi_conceal_color *) &pkt->rg_property_data[1];
-		if (hfi)
-			hfi->conceal_color =
-				((struct hfi_conceal_color *) pdata)->
-				conceal_color;
-		pkt->size += sizeof(u32) * 2;
-		break;
-	}
 	case HAL_CONFIG_VPE_OPERATIONS:
 		break;
 	case HAL_PARAM_VENC_INTRA_REFRESH:
@@ -1342,6 +1335,30 @@ int create_pkt_cmd_session_set_property(
 		pkt->size += sizeof(u32) + sizeof(struct hfi_enable);
 		break;
 	}
+	case HAL_PARAM_VENC_H264_VUI_BITSTREAM_RESTRC:
+	{
+		struct hfi_enable *hfi;
+		struct hal_h264_vui_bitstream_restrc *hal = pdata;
+
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_PARAM_VENC_H264_VUI_BITSTREAM_RESTRC;
+		hfi = (struct hfi_enable *) &pkt->rg_property_data[1];
+		hfi->enable = hal->enable;
+		pkt->size += sizeof(u32) + sizeof(struct hfi_enable);
+		break;
+	}
+	case HAL_PARAM_VENC_PRESERVE_TEXT_QUALITY:
+	{
+		struct hfi_enable *hfi;
+		struct hal_preserve_text_quality *hal = pdata;
+
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_PARAM_VENC_PRESERVE_TEXT_QUALITY;
+		hfi = (struct hfi_enable *) &pkt->rg_property_data[1];
+		hfi->enable = hal->enable;
+		pkt->size += sizeof(u32) + sizeof(struct hfi_enable);
+		break;
+	}
 	/* FOLLOWING PROPERTIES ARE NOT IMPLEMENTED IN CORE YET */
 	case HAL_CONFIG_BUFFER_REQUIREMENTS:
 	case HAL_CONFIG_PRIORITY:
@@ -1406,5 +1423,19 @@ int create_pkt_ssr_cmd(enum hal_ssr_trigger_type type,
 	pkt->size = sizeof(struct hfi_cmd_sys_test_ssr_packet);
 	pkt->packet_type = HFI_CMD_SYS_TEST_SSR;
 	pkt->trigger_type = get_hfi_ssr_type(type);
+	return 0;
+}
+
+int create_pkt_cmd_sys_image_version(
+		struct hfi_cmd_sys_get_property_packet *pkt)
+{
+	if (!pkt) {
+		dprintk(VIDC_ERR, "%s invalid param :%p\n", __func__, pkt);
+		return -EINVAL;
+	}
+	pkt->size = sizeof(struct hfi_cmd_sys_get_property_packet);
+	pkt->packet_type = HFI_CMD_SYS_GET_PROPERTY;
+	pkt->num_properties = 1;
+	pkt->rg_property_data[0] = HFI_PROPERTY_SYS_IMAGE_VERSION;
 	return 0;
 }
