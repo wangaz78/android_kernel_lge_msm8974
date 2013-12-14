@@ -835,12 +835,12 @@ static void handle_ebd(enum command_response cmd, void *data)
 		vb->v4l2_planes[0].bytesused = response->input_done.filled_len;
 		vb->v4l2_planes[0].data_offset = response->input_done.offset;
 		if (vb->v4l2_planes[0].data_offset > vb->v4l2_planes[0].length)
-			dprintk(VIDC_ERR, "Error: data_offset overflow\n");
+			dprintk(VIDC_INFO, "data_offset overflow length\n");
 		if (vb->v4l2_planes[0].bytesused > vb->v4l2_planes[0].length)
-			dprintk(VIDC_ERR, "Error: buffer overflow\n");
+			dprintk(VIDC_INFO, "bytesused overflow length\n");
 		if ((u8 *)vb->v4l2_planes[0].m.userptr !=
 			response->input_done.packet_buffer)
-			dprintk(VIDC_ERR, "Error: unexpected buffer address\n");
+			dprintk(VIDC_INFO, "Unexpected buffer address\n");
 		vb->v4l2_buf.flags = 0;
 		empty_buf_done = (struct vidc_hal_ebd *)&response->input_done;
 		if (empty_buf_done) {
@@ -1029,11 +1029,8 @@ static void handle_fbd(enum command_response cmd, void *data)
 			vb->v4l2_buf.flags |= V4L2_QCOM_BUF_DROP_FRAME;
 		switch (fill_buf_done->picture_type) {
 		case HAL_PICTURE_IDR:
-// LGE_CHANGE_S, [Miracast][kyoohyun.kim@lge.com], 20130606, QCT patch for external device non-update issue
-			//vb->v4l2_buf.flags |= V4L2_QCOM_BUF_FLAG_IDRFRAME;
 			vb->v4l2_buf.flags |= V4L2_QCOM_BUF_FLAG_IDRFRAME;
-			vb->v4l2_buf.flags |= V4L2_BUF_FLAG_KEYFRAME; 
-// LGE_CHANGE_E, [Miracast][kyoohyun.kim@lge.com], 20130606, QCT patch for external device non-update issue
+			vb->v4l2_buf.flags |= V4L2_BUF_FLAG_KEYFRAME;
 			break;
 		case HAL_PICTURE_I:
 			vb->v4l2_buf.flags |= V4L2_BUF_FLAG_KEYFRAME;
@@ -1505,9 +1502,7 @@ static enum hal_video_codec get_hal_codec_type(int fourcc)
 	case V4L2_PIX_FMT_HEVC:
 		codec = HAL_VIDEO_CODEC_HEVC;
 		break;
-	case V4L2_PIX_FMT_HEVC_HYBRID:
-		codec = HAL_VIDEO_CODEC_HEVC_HYBRID;
-		break;
+
 	default:
 		dprintk(VIDC_ERR, "Wrong codec: %d\n", fourcc);
 		codec = HAL_UNUSED_CODEC;
@@ -1588,7 +1583,6 @@ static int msm_vidc_load_resources(int flipped_state,
 	struct hfi_device *hdev;
 	int num_mbs_per_sec = 0;
 
-	// LGE_CHANGE_S, [G2_Player][haewook.kim@lge.com], 20130606, final patch for multi instance
 	if (!inst || !inst->core || !inst->core->device) {
 		dprintk(VIDC_ERR, "%s invalid parameters", __func__);
 		return -EINVAL;
