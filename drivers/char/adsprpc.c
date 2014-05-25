@@ -87,7 +87,7 @@ static inline uint32_t buf_page_size(uint32_t size)
 static inline int buf_get_pages(void *addr, int sz, int nr_pages, int access,
 				  struct smq_phy_page *pages, int nr_elems)
 {
-	struct vm_area_struct *vma;
+	struct vm_area_struct *vma, *vmaend;
 	uint32_t start = buf_page_start(addr);
 	uint32_t end = buf_page_start((void *)((uint32_t)addr + sz - 1));
 	uint32_t len = nr_pages << PAGE_SHIFT;
@@ -101,14 +101,14 @@ static inline int buf_get_pages(void *addr, int sz, int nr_pages, int access,
 	VERIFY(err, 0 != (vma = find_vma(current->mm, start)));
 	if (err)
 		goto bail;
-	VERIFY(err, ((uint32_t)addr + sz) <= vma->vm_end);
+	VERIFY(err, 0 != (vmaend = find_vma(current->mm, end)));
 	if (err)
 		goto bail;
 	n = 0;
 	VERIFY(err, 0 == follow_pfn(vma, start, &pfn));
 	if (err)
 		goto bail;
-	VERIFY(err, 0 == follow_pfn(vma, end, &pfnend));
+	VERIFY(err, 0 == follow_pfn(vmaend, end, &pfnend));
 	if (err)
 		goto bail;
 	VERIFY(err, (pfn + nr_pages - 1) == pfnend);
@@ -198,7 +198,7 @@ static void free_mem(struct fastrpc_buf *buf)
 					me->smmu.domain_id, 0);
 			buf->phys = 0;
 		}
-		if (buf->virt) {
+		if (!IS_ERR_OR_NULL(buf->virt)) {
 			ion_unmap_kernel(me->iclient, buf->handle);
 			buf->virt = 0;
 		}
@@ -211,7 +211,7 @@ static void free_map(struct fastrpc_mmap *map)
 {
 	struct fastrpc_apps *me = &gfa;
 	if (!IS_ERR_OR_NULL(map->handle)) {
-		if (map->virt) {
+		if (!IS_ERR_OR_NULL(map->virt)) {
 			ion_unmap_kernel(me->iclient, map->handle);
 			map->virt = 0;
 		}
@@ -230,13 +230,15 @@ static int alloc_mem(struct fastrpc_buf *buf)
 	unsigned long len;
 	buf->handle = 0;
 	buf->virt = 0;
+	buf->phys = 0;
 	heap = me->smmu.enabled ? ION_HEAP(ION_IOMMU_HEAP_ID) :
 		ION_HEAP(ION_ADSP_HEAP_ID) | ION_HEAP(ION_AUDIO_HEAP_ID);
-	buf->handle = ion_alloc(clnt, buf->size, SZ_4K, heap, 0);
+	buf->handle = ion_alloc(clnt, buf->size, SZ_4K, heap, ION_FLAG_CACHED);
 	VERIFY(err, 0 == IS_ERR_OR_NULL(buf->handle));
 	if (err)
 		goto bail;
-	VERIFY(err, 0 != (buf->virt = ion_map_kernel(clnt, buf->handle)));
+	buf->virt = ion_map_kernel(clnt, buf->handle);
+	VERIFY(err, 0 == IS_ERR_OR_NULL(buf->virt));
 	if (err)
 		goto bail;
 	if (me->smmu.enabled) {
@@ -355,6 +357,9 @@ static int get_page_list(uint32_t kernel, uint32_t sc, remote_arg_t *pra,
 		list[i].num = 0;
 		list[i].pgidx = 0;
 		len = pra[i].buf.len;
+		VERIFY(err, len >= 0);
+		if (err)
+			goto bail;
 		if (!len)
 			continue;
 		buf = pra[i].buf.pv;
@@ -401,7 +406,7 @@ static int get_args(uint32_t kernel, uint32_t sc, remote_arg_t *pra,
 	struct smq_invoke_buf *list;
 	struct fastrpc_buf *pbuf = ibuf, *obufs = 0;
 	struct smq_phy_page *pages;
-	struct ion_handle **handles;
+	struct ion_handle **handles = NULL;
 	void *args;
 	int i, rlen, size, used, inh, bufs = 0, err = 0;
 	int inbufs = REMOTE_SCALARS_INBUFS(sc);
@@ -798,7 +803,7 @@ static int fastrpc_internal_invoke(struct fastrpc_apps *me, uint32_t kernel,
 	struct fastrpc_device *dev = 0;
 	struct smq_invoke_ctx *ctx = 0;
 	struct fastrpc_buf obuf, *abufs = 0, *b;
-	struct ion_handle **handles;
+	struct ion_handle **handles = NULL;
 	int interrupted = 0;
 	uint32_t sc;
 	int i, bufs, nbufs = 0, err = 0;
@@ -852,7 +857,7 @@ static int fastrpc_internal_invoke(struct fastrpc_apps *me, uint32_t kernel,
 	context_free(ctx);
 
 	if (me->smmu.enabled) {
-		bufs = REMOTE_SCALARS_LENGTH(sc);
+		bufs = REMOTE_SCALARS_INBUFS(sc) + REMOTE_SCALARS_OUTBUFS(sc);
 		if (fds) {
 			handles = (struct ion_handle **)(fds + bufs);
 			for (i = 0; i < bufs; i++)
@@ -1028,7 +1033,8 @@ static int fastrpc_internal_mmap(struct fastrpc_apps *me,
 	VERIFY(err, 0 == IS_ERR_OR_NULL(map->handle));
 	if (err)
 		goto bail;
-	VERIFY(err, 0 != (map->virt = ion_map_kernel(clnt, map->handle)));
+	map->virt = ion_map_kernel(clnt, map->handle);
+	VERIFY(err, 0 == IS_ERR_OR_NULL(map->virt));
 	if (err)
 		goto bail;
 	buf = (void *)mmap->vaddrin;

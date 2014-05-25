@@ -263,7 +263,7 @@ int mdp3_ppp_pipe_wait(void)
 	spin_unlock_irqrestore(&ppp_stat->ppp_lock, flag);
 
 	if (wait) {
-		ret = wait_for_completion_interruptible_timeout(
+		ret = wait_for_completion_timeout(
 		   &ppp_stat->ppp_comp, 5 * HZ);
 		if (!ret)
 			pr_err("%s: Timed out waiting for the MDP.\n",
@@ -901,7 +901,7 @@ static void mdp3_ppp_blit_wq_handler(struct work_struct *work)
 	req = mdp3_ppp_next_req(&ppp_stat->req_q);
 	mutex_lock(&ppp_stat->config_ppp_mutex);
 
-	mdp3_ppp_iommu_attach();
+	mdp3_iommu_enable(MDP3_CLIENT_PPP);
 	mdp3_ppp_turnon(mfd, 1);
 	while (req) {
 		mdp3_ppp_wait_for_fence(req);
@@ -926,7 +926,7 @@ static void mdp3_ppp_blit_wq_handler(struct work_struct *work)
 		mutex_unlock(&ppp_stat->req_mutex);
 	}
 	mdp3_ppp_turnon(mfd, 0);
-	mdp3_ppp_iommu_dettach();
+	mdp3_iommu_disable(MDP3_CLIENT_PPP);
 	mutex_unlock(&ppp_stat->config_ppp_mutex);
 }
 
@@ -944,7 +944,7 @@ int mdp3_ppp_parse_req(void __user *p,
 	while (req_q->count >= MDP3_PPP_MAX_LIST_REQ) {
 		ppp_stat->wait_for_pop = true;
 		mutex_unlock(&ppp_stat->req_mutex);
-		rc = wait_for_completion_interruptible_timeout(
+		rc = wait_for_completion_timeout(
 		   &ppp_stat->pop_q_comp, 5 * HZ);
 		if (rc == 0) {
 			/* This will only occur if there is serious problem */

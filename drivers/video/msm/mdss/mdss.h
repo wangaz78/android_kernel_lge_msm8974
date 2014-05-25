@@ -26,6 +26,8 @@
 #define MDSS_REG_WRITE(addr, val) writel_relaxed(val, mdss_res->mdp_base + addr)
 #define MDSS_REG_READ(addr) readl_relaxed(mdss_res->mdp_base + addr)
 
+#define MAX_DRV_SUP_MMB_BLKS	44
+
 enum mdss_mdp_clk_type {
 	MDSS_CLK_AHB,
 	MDSS_CLK_AXI,
@@ -67,6 +69,8 @@ struct mdss_data_type {
 	size_t mdp_reg_size;
 	char __iomem *vbif_base;
 
+	struct mutex reg_lock;
+
 	u32 irq;
 	u32 irq_mask;
 	u32 irq_ena;
@@ -87,6 +91,7 @@ struct mdss_data_type {
 	u32 res_init;
 	u32 bus_hdl;
 
+	u32 highest_bank_bit;
 	u32 smp_mb_cnt;
 	u32 smp_mb_size;
 	u32 smp_mb_per_pipe;
@@ -101,6 +106,9 @@ struct mdss_data_type {
 	u32 nvig_pipes;
 	u32 nrgb_pipes;
 	u32 ndma_pipes;
+
+	DECLARE_BITMAP(mmb_alloc_map, MAX_DRV_SUP_MMB_BLKS);
+
 	struct mdss_mdp_mixer *mixer_intf;
 	struct mdss_mdp_mixer *mixer_wb;
 	u32 nmixers_intf;

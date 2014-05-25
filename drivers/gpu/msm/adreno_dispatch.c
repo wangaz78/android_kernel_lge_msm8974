@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -186,10 +186,9 @@ static inline int adreno_dispatcher_requeue_cmdbatch(
 		return -EINVAL;
 	}
 
-	prev = drawctxt->cmdqueue_head - 1;
-
-	if (prev < 0)
-		prev = ADRENO_CONTEXT_CMDQUEUE_SIZE - 1;
+	prev = drawctxt->cmdqueue_head == 0 ?
+		(ADRENO_CONTEXT_CMDQUEUE_SIZE - 1) :
+		(drawctxt->cmdqueue_head - 1);
 
 	/*
 	 * The maximum queue size always needs to be one less then the size of
@@ -250,13 +249,12 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
 	int ret;
 
-	mutex_lock(&device->mutex);
-
 	dispatcher->inflight++;
+
+	mutex_lock(&device->mutex);
 
 	if (dispatcher->inflight == 1 &&
 			!test_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv)) {
-
 		/* Time to make the donuts.  Turn on the GPU */
 		ret = kgsl_active_count_get(device);
 		if (ret) {
@@ -349,9 +347,6 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 
 		cmdbatch = adreno_dispatcher_get_cmdbatch(drawctxt);
 
-		if (cmdbatch == NULL)
-			break;
-
 		/*
 		 * adreno_context_get_cmdbatch returns -EAGAIN if the current
 		 * cmdbatch has pending sync points so no more to do here.
@@ -359,8 +354,9 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 		 * reqeueued
 		 */
 
-		if (IS_ERR(cmdbatch) && PTR_ERR(cmdbatch) == -EAGAIN) {
-			requeued = 1;
+		if (IS_ERR_OR_NULL(cmdbatch)) {
+			if (IS_ERR(cmdbatch) && PTR_ERR(cmdbatch) == -EAGAIN)
+				requeued = 1;
 			break;
 		}
 
@@ -401,7 +397,7 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 	 */
 
 	if (count)
-		wake_up_interruptible_all(&drawctxt->wq);
+		wake_up_all(&drawctxt->wq);
 
 	/*
 	 * Return positive if the context submitted commands or if we figured
@@ -1248,7 +1244,6 @@ static void adreno_dispatcher_work(struct work_struct *work)
 		container_of(dispatcher, struct adreno_device, dispatcher);
 	struct kgsl_device *device = &adreno_dev->dev;
 	int count = 0;
-	int last_context = KGSL_CONTEXT_INVALID;
 	int fault_handled = 0;
 
 	mutex_lock(&dispatcher->mutex);
@@ -1292,9 +1287,6 @@ static void adreno_dispatcher_work(struct work_struct *work)
 
 			trace_adreno_cmdbatch_retired(cmdbatch,
 				dispatcher->inflight - 1);
-
-			/* Remember the last context that got retired */
-			last_context = cmdbatch->context->id;
 
 			/* Reduce the number of inflight command batches */
 			dispatcher->inflight--;
@@ -1381,7 +1373,7 @@ static void adreno_dispatcher_work(struct work_struct *work)
 	 * If inflight went to 0, queue back up the event processor to catch
 	 * stragglers
 	 */
-	if (count && dispatcher->inflight == 0) {
+	if (dispatcher->inflight == 0 && count) {
 		mutex_lock(&device->mutex);
 		queue_work(device->work_queue, &device->ts_expired_ws);
 		mutex_unlock(&device->mutex);
@@ -1400,18 +1392,6 @@ done:
 		/* Update the timeout timer for the next command batch */
 		mod_timer(&dispatcher->timer, cmdbatch->expires);
 
-		/*
-		 * if the context for the next pending cmdbatch is different
-		 * than the last one we retired, then trace it as a GPU switch
-		 */
-
-		if (cmdbatch->context->id != last_context) {
-			u64 now = ktime_to_ns(ktime_get());
-			kgsl_trace_gpu_sched_switch(device->name, now,
-				cmdbatch->context->id, cmdbatch->priority,
-				cmdbatch->timestamp);
-		}
-
 		/* There are still things in flight - update the idle counts */
 		mutex_lock(&device->mutex);
 		kgsl_pwrscale_idle(device);
@@ -1419,7 +1399,6 @@ done:
 	} else {
 		/* There is nothing left in the pipeline.  Shut 'er down boys */
 		mutex_lock(&device->mutex);
-
 		/*
 		 * Stop the fault timer before decrementing the active count to
 		 * avoid reading the hardware registers while we are trying to
@@ -1434,6 +1413,11 @@ done:
 
 		mutex_unlock(&device->mutex);
 	}
+
+	/* Before leaving update the pwrscale information */
+	mutex_lock(&device->mutex);
+	kgsl_pwrscale_idle(device);
+	mutex_unlock(&device->mutex);
 
 	mutex_unlock(&dispatcher->mutex);
 }
@@ -1476,8 +1460,6 @@ void adreno_dispatcher_fault_timer(unsigned long data)
 	struct adreno_device *adreno_dev = (struct adreno_device *) data;
 	struct kgsl_device *device = &adreno_dev->dev;
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
-
-	BUG_ON(atomic_read(&device->active_cnt) == 0);
 
 	/* Leave if the user decided to turn off fast hang detection */
 	if (adreno_dev->fast_hang_detect == 0)
@@ -1533,7 +1515,13 @@ void adreno_dispatcher_irq_fault(struct kgsl_device *device)
  */
 void adreno_dispatcher_start(struct kgsl_device *device)
 {
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
 	complete_all(&device->cmdbatch_gate);
+
+	/* a305b & a305c GPUs are slower than a330 and needs a larger timer */
+	if (adreno_is_a305b(adreno_dev) || adreno_is_a305c(adreno_dev))
+		_fault_timer_interval = 200;
 
 	/* Schedule the work loop to get things going */
 	adreno_dispatcher_schedule(device);
