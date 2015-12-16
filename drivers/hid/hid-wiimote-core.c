@@ -769,7 +769,7 @@ static void __ir_to_input(struct wiimote_data *wdata, const __u8 *ir,
 
 	/*
 	 * Basic IR data is encoded into 3 bytes. The first two bytes are the
-	 * upper 8 bit of the X/Y data, the 3rd byte contains the lower 2 bits
+	 * lower 8 bit of the X/Y data, the 3rd byte contains the upper 2 bits
 	 * of both.
 	 * If data is packed, then the 3rd byte is put first and slightly
 	 * reordered. This allows to interleave packed and non-packed data to
@@ -778,17 +778,11 @@ static void __ir_to_input(struct wiimote_data *wdata, const __u8 *ir,
 	 */
 
 	if (packed) {
-		x = ir[1] << 2;
-		y = ir[2] << 2;
-
-		x |= ir[0] & 0x3;
-		y |= (ir[0] >> 2) & 0x3;
+		x = ir[1] | ((ir[0] & 0x03) << 8);
+		y = ir[2] | ((ir[0] & 0x0c) << 6);
 	} else {
-		x = ir[0] << 2;
-		y = ir[1] << 2;
-
-		x |= (ir[2] >> 4) & 0x3;
-		y |= (ir[2] >> 6) & 0x3;
+		x = ir[0] | ((ir[2] & 0x30) << 4);
+		y = ir[1] | ((ir[2] & 0xc0) << 2);
 	}
 
 	input_report_abs(wdata->ir, xid, x);
@@ -1166,6 +1160,7 @@ static void wiimote_destroy(struct wiimote_data *wdata)
 	wiimote_leds_destroy(wdata);
 
 	power_supply_unregister(&wdata->battery);
+	kfree(wdata->battery.name);
 	input_unregister_device(wdata->accel);
 	input_unregister_device(wdata->ir);
 	input_unregister_device(wdata->input);
@@ -1222,9 +1217,14 @@ static int wiimote_hid_probe(struct hid_device *hdev,
 	wdata->battery.properties = wiimote_battery_props;
 	wdata->battery.num_properties = ARRAY_SIZE(wiimote_battery_props);
 	wdata->battery.get_property = wiimote_battery_get_property;
-	wdata->battery.name = "wiimote_battery";
 	wdata->battery.type = POWER_SUPPLY_TYPE_BATTERY;
 	wdata->battery.use_for_apm = 0;
+	wdata->battery.name = kasprintf(GFP_KERNEL, "wiimote_battery_%s",
+					wdata->hdev->uniq);
+	if (!wdata->battery.name) {
+		ret = -ENOMEM;
+		goto err_battery_name;
+	}
 
 	ret = power_supply_register(&wdata->hdev->dev, &wdata->battery);
 	if (ret) {
@@ -1260,6 +1260,8 @@ err_free:
 	return ret;
 
 err_battery:
+	kfree(wdata->battery.name);
+err_battery_name:
 	input_unregister_device(wdata->input);
 	wdata->input = NULL;
 err_input:
