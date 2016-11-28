@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,7 +28,6 @@
 #include <linux/device.h>
 #include <linux/notifier.h>
 #include <linux/slab.h>
-#include <linux/workqueue.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -56,7 +55,6 @@ struct msm_rpm_driver_data {
 	const char *ch_name;
 	uint32_t ch_type;
 	smd_channel_t *ch_info;
-	struct work_struct work;
 	spinlock_t smd_lock_write;
 	spinlock_t smd_lock_read;
 	struct completion smd_open;
@@ -67,10 +65,11 @@ struct msm_rpm_driver_data {
 #define DEBUG_PRINT_BUFFER_SIZE 512
 #define MAX_SLEEP_BUFFER 128
 #define SMD_CHANNEL_NOTIF_TIMEOUT 5000
-#define GFP_FLAG(noirq) (noirq ? GFP_ATOMIC : GFP_KERNEL)
+#define GFP_FLAG(noirq) (noirq ? GFP_ATOMIC : GFP_NOFS)
 #define INV_RSC "resource does not exist"
 #define ERR "err\0"
 #define MAX_ERR_BUFFER_SIZE 128
+#define MAX_WAIT_ON_ACK 24
 #define INIT_ERROR 1
 
 static ATOMIC_NOTIFIER_HEAD(msm_rpm_sleep_notifier);
@@ -85,8 +84,6 @@ int msm_rpm_unregister_notifier(struct notifier_block *nb)
 {
 	return atomic_notifier_chain_unregister(&msm_rpm_sleep_notifier, nb);
 }
-
-static struct workqueue_struct *msm_rpm_smd_wq;
 
 enum {
 	MSM_RPM_MSG_REQUEST_TYPE = 0,
@@ -386,10 +383,15 @@ static void msm_rpm_print_sleep_buffer(struct slp_buf *s)
 	printk(buf);
 }
 
+static struct msm_rpm_driver_data msm_rpm_data;
+
 static int msm_rpm_flush_requests(bool print)
 {
 	struct rb_node *t;
 	int ret;
+	int pkt_sz;
+	char buf[MAX_ERR_BUFFER_SIZE] = {0};
+	int count = 0;
 
 	for (t = rb_first(&tr_root); t; t = rb_next(t)) {
 
@@ -404,12 +406,23 @@ static int msm_rpm_flush_requests(bool print)
 		get_msg_id(s->buf) = msm_rpm_get_next_msg_id();
 		ret = msm_rpm_send_smd_buffer(s->buf,
 				get_buf_len(s->buf), true);
-		/* By not adding the message to a wait list we can reduce
-		 * latency involved in waiting for a ACK from RPM. The ACK
-		 * messages will be processed when we wakeup from sleep but
-		 * processing should be minimal
-		 * msm_rpm_wait_for_ack_noirq(get_msg_id(s->buf));
+
+		/*
+		 * RPM acks need to be handled here if we have sent over
+		 * 24 messages such that we do not overrun SMD buffer. Since
+		 * we expect only sleep sets at this point (RPM PC would be
+		 * disallowed if we had pending active requests), we need not
+		 * process these sleep set acks.
 		 */
+		count++;
+		if (count > MAX_WAIT_ON_ACK) {
+			int len;
+			pkt_sz = smd_cur_packet_size(msm_rpm_data.ch_info);
+			if (pkt_sz)
+				len = smd_read(msm_rpm_data.ch_info, buf,
+							pkt_sz);
+			count--;
+		}
 
 		WARN_ON(ret != get_buf_len(s->buf));
 
@@ -421,13 +434,10 @@ static int msm_rpm_flush_requests(bool print)
 		s->valid = false;
 	}
 	return 0;
-
 }
 
 
 static atomic_t msm_rpm_msg_id = ATOMIC_INIT(0);
-
-static struct msm_rpm_driver_data msm_rpm_data;
 
 struct msm_rpm_request {
 	struct rpm_request_header req_hdr;
@@ -1306,12 +1316,16 @@ EXPORT_SYMBOL(msm_rpm_send_message_noirq);
  */
 int msm_rpm_enter_sleep(bool print, const struct cpumask *cpumask)
 {
+	int ret = 0;
+
 	if (standalone)
 		return 0;
 
-	msm_rpm_flush_requests(print);
+	ret = smd_mask_receive_interrupt(msm_rpm_data.ch_info, true, cpumask);
+	if (!ret)
+		msm_rpm_flush_requests(print);
 
-	return smd_mask_receive_interrupt(msm_rpm_data.ch_info, true, cpumask);
+	return ret;
 }
 EXPORT_SYMBOL(msm_rpm_enter_sleep);
 
@@ -1361,6 +1375,8 @@ static int __devinit msm_rpm_dev_probe(struct platform_device *pdev)
 
 	key = "rpm-standalone";
 	standalone = of_property_read_bool(pdev->dev.of_node, key);
+	if (standalone)
+		goto skip_smd_init;
 
 	msm_rpm_smd_remote_driver.driver.name = msm_rpm_data.ch_name;
 	init_completion(&msm_rpm_data.remote_open);
@@ -1381,28 +1397,13 @@ static int __devinit msm_rpm_dev_probe(struct platform_device *pdev)
 		pr_info("Cannot open RPM channel %s %d\n", msm_rpm_data.ch_name,
 				msm_rpm_data.ch_type);
 
-		BUG_ON(!standalone);
-		complete(&msm_rpm_data.smd_open);
-	} else {
-		/*
-		 * Override DT's suggestion to try standalone; since we have an
-		 * SMD channel.
-		 */
-		standalone = false;
 	}
 
 	wait_for_completion(&msm_rpm_data.smd_open);
 
 	smd_disable_read_intr(msm_rpm_data.ch_info);
 
-	if (!standalone) {
-		msm_rpm_smd_wq = alloc_workqueue("rpm-smd",
-				WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_HIGHPRI, 1);
-		if (!msm_rpm_smd_wq)
-			return -EINVAL;
-		queue_work(msm_rpm_smd_wq, &msm_rpm_data.work);
-	}
-
+skip_smd_init:
 	of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
 
 	if (standalone)
